@@ -3,7 +3,7 @@ Message monitoring cog for detecting and analyzing messages.
 """
 import asyncio
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List, Dict
 import discord
 from discord.ext import commands
 
@@ -11,6 +11,7 @@ from config import settings
 from utils.logger import log
 from utils.database import db
 from utils.cache import cache
+from services.risk_assessment import risk_service
 
 
 class MessageMonitoring(commands.Cog):
@@ -61,8 +62,12 @@ class MessageMonitoring(commands.Cog):
                 # Get message from queue
                 message = await self.message_queue.get()
 
-                # Store message in database
-                await self.store_message(message)
+                # Store message in database and get its ID
+                message_db_id = await self.store_message(message)
+
+                # Perform risk assessment if message was stored successfully
+                if message_db_id and settings.enable_risk_monitoring:
+                    await self.analyze_message_risk(message, message_db_id)
 
                 # Small delay to avoid overwhelming the system
                 await asyncio.sleep(settings.analysis_delay_seconds)
@@ -74,8 +79,13 @@ class MessageMonitoring(commands.Cog):
                 log.error(f"Error processing message: {e}")
                 await asyncio.sleep(1)
 
-    async def store_message(self, message: discord.Message):
-        """Store message in database."""
+    async def store_message(self, message: discord.Message) -> Optional[int]:
+        """
+        Store message in database.
+
+        Returns:
+            Database ID of stored message, or None if failed
+        """
         try:
             # Check if user exists, create if not
             await self.ensure_user_exists(message.author, message.guild)
@@ -92,7 +102,7 @@ class MessageMonitoring(commands.Cog):
                 str(message.guild.id)
             )
 
-            # Store message
+            # Store message and get its ID
             query = """
                 INSERT INTO messages (
                     discord_message_id,
@@ -106,6 +116,7 @@ class MessageMonitoring(commands.Cog):
                 )
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 ON CONFLICT (discord_message_id) DO NOTHING
+                RETURNING id
             """
 
             attachments = [
@@ -123,7 +134,7 @@ class MessageMonitoring(commands.Cog):
                 "channel_name": message.channel.name if hasattr(message.channel, "name") else None,
             }
 
-            await db.execute(
+            message_db_id = await db.fetchval(
                 query,
                 str(message.id),
                 server_id,
@@ -137,8 +148,101 @@ class MessageMonitoring(commands.Cog):
 
             log.debug(f"Stored message {message.id} from user {message.author.name}")
 
+            # Increment user message count
+            if message_db_id:
+                await db.execute(
+                    "UPDATE users SET total_messages = total_messages + 1 WHERE id = $1",
+                    user_id
+                )
+
+            return message_db_id
+
         except Exception as e:
             log.error(f"Failed to store message {message.id}: {e}")
+            return None
+
+    async def analyze_message_risk(
+        self,
+        message: discord.Message,
+        message_db_id: int
+    ):
+        """
+        Analyze message for risk indicators.
+
+        Args:
+            message: Discord message object
+            message_db_id: Database ID of the message
+        """
+        try:
+            # Get database IDs
+            user_id = await db.fetchval(
+                "SELECT id FROM users WHERE discord_user_id = $1",
+                str(message.author.id)
+            )
+
+            server_id = await db.fetchval(
+                "SELECT id FROM servers WHERE discord_server_id = $1",
+                str(message.guild.id)
+            )
+
+            # Get context messages (previous messages in channel)
+            context = await self.get_message_context(message)
+
+            # Perform risk assessment
+            assessment = await risk_service.assess_message(
+                message_id=message_db_id,
+                message_content=message.content or "",
+                user_id=user_id,
+                server_id=server_id,
+                context_messages=context
+            )
+
+            log.debug(
+                f"Risk assessment complete for message {message.id}: "
+                f"score={assessment.get('risk_score', 0):.1f}"
+            )
+
+        except Exception as e:
+            log.error(f"Error analyzing message risk: {e}")
+
+    async def get_message_context(
+        self,
+        message: discord.Message,
+        limit: int = 5
+    ) -> List[Dict]:
+        """
+        Get previous messages from the same channel for context.
+
+        Args:
+            message: Current message
+            limit: Number of previous messages to retrieve
+
+        Returns:
+            List of previous messages as dicts
+        """
+        context = []
+
+        try:
+            # Get previous messages from the channel
+            async for prev_msg in message.channel.history(
+                limit=limit,
+                before=message,
+                oldest_first=False
+            ):
+                if not prev_msg.author.bot:  # Skip bot messages
+                    context.append({
+                        "author": prev_msg.author.name,
+                        "content": prev_msg.content,
+                        "timestamp": prev_msg.created_at.isoformat()
+                    })
+
+            # Reverse to get chronological order
+            context.reverse()
+
+        except Exception as e:
+            log.error(f"Error getting message context: {e}")
+
+        return context
 
     async def ensure_user_exists(self, user: discord.User, guild: discord.Guild):
         """Ensure user exists in database, create if not."""

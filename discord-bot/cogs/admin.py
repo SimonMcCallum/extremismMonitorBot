@@ -233,6 +233,88 @@ class AdminCommands(commands.Cog):
                 ephemeral=True
             )
 
+    @app_commands.command(name="alerts", description="View active alerts")
+    @app_commands.describe(status="Filter by status (open/acknowledged/resolved)")
+    @app_commands.default_permissions(administrator=True)
+    async def alerts(
+        self,
+        interaction: discord.Interaction,
+        status: str = "open"
+    ):
+        """View active alerts for this server."""
+        try:
+            await interaction.response.defer(ephemeral=True)
+
+            # Get server ID
+            server_id = await db.fetchval(
+                "SELECT id FROM servers WHERE discord_server_id = $1",
+                str(interaction.guild.id)
+            )
+
+            if not server_id:
+                await interaction.followup.send(
+                    "Server not found in database.",
+                    ephemeral=True
+                )
+                return
+
+            # Get alerts
+            alerts = await db.fetch(
+                """
+                SELECT a.id, a.severity, a.title, a.description,
+                       a.created_at, u.username, u.discord_user_id
+                FROM alerts a
+                JOIN users u ON a.user_id = u.id
+                WHERE a.server_id = $1 AND a.status = $2
+                ORDER BY a.created_at DESC
+                LIMIT 10
+                """,
+                server_id,
+                status
+            )
+
+            if not alerts:
+                await interaction.followup.send(
+                    f"No {status} alerts found.",
+                    ephemeral=True
+                )
+                return
+
+            # Create embed
+            embed = discord.Embed(
+                title=f"🚨 Active Alerts ({status.capitalize()})",
+                description=f"Showing {len(alerts)} most recent alerts",
+                color=discord.Color.red(),
+                timestamp=datetime.utcnow()
+            )
+
+            for alert in alerts[:5]:  # Show top 5
+                severity_emoji = {
+                    "critical": "🔴",
+                    "high": "🟠",
+                    "medium": "🟡",
+                    "low": "🟢"
+                }.get(alert['severity'], "⚪")
+
+                embed.add_field(
+                    name=f"{severity_emoji} {alert['title']}",
+                    value=(
+                        f"User: {alert['username']}\n"
+                        f"ID: {alert['id']}\n"
+                        f"Time: {alert['created_at'].strftime('%Y-%m-%d %H:%M')}"
+                    ),
+                    inline=False
+                )
+
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+        except Exception as e:
+            log.error(f"Error in alerts command: {e}")
+            await interaction.followup.send(
+                "❌ An error occurred while fetching alerts.",
+                ephemeral=True
+            )
+
     @app_commands.command(name="sync", description="Sync slash commands")
     @app_commands.default_permissions(administrator=True)
     async def sync(self, interaction: discord.Interaction):

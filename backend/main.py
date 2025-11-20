@@ -80,12 +80,14 @@ async def api_status():
     }
 
 
-# Include API routers (to be added)
-# from api.v1 import servers, users, risks, analytics
-# app.include_router(servers.router, prefix=f"{settings.api_prefix}/servers", tags=["servers"])
-# app.include_router(users.router, prefix=f"{settings.api_prefix}/users", tags=["users"])
-# app.include_router(risks.router, prefix=f"{settings.api_prefix}/risks", tags=["risks"])
-# app.include_router(analytics.router, prefix=f"{settings.api_prefix}/analytics", tags=["analytics"])
+# Include API routers
+from api.v1 import risks
+
+app.include_router(
+    risks.router,
+    prefix=f"{settings.api_prefix}/risks",
+    tags=["risks"]
+)
 
 
 if __name__ == "__main__":
