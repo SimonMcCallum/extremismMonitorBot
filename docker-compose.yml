@@ -1,0 +1,110 @@
+version: '3.8'
+
+services:
+  # PostgreSQL with TimescaleDB
+  postgres:
+    image: timescale/timescaledb:latest-pg15
+    container_name: extremism-postgres
+    environment:
+      POSTGRES_USER: extremism_user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: extremism_monitor
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - extremism-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U extremism_user -d extremism_monitor"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis
+  redis:
+    image: redis:7-alpine
+    container_name: extremism-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - extremism-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Backend API
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: extremism-api
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://extremism_user:password@postgres:5432/extremism_monitor
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=development-secret-key-change-in-production
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-your_key_here}
+      - ENVIRONMENT=development
+      - DEBUG=true
+      - LOG_LEVEL=INFO
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - backend_logs:/app/logs
+    networks:
+      - extremism-network
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Discord Bot
+  bot:
+    build:
+      context: ./discord-bot
+      dockerfile: Dockerfile
+    container_name: extremism-bot
+    environment:
+      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN:-your_token_here}
+      - DISCORD_CLIENT_ID=${DISCORD_CLIENT_ID:-your_client_id}
+      - API_BASE_URL=http://api:8000
+      - DATABASE_URL=postgresql://extremism_user:password@postgres:5432/extremism_monitor
+      - REDIS_URL=redis://redis:6379/0
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-your_key_here}
+      - ENVIRONMENT=development
+      - DEBUG=true
+      - LOG_LEVEL=INFO
+      - ENABLE_RISK_MONITORING=true
+      - ENABLE_ENGAGEMENT_TRACKING=true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+    volumes:
+      - ./discord-bot:/app
+      - bot_logs:/app/logs
+    networks:
+      - extremism-network
+    restart: unless-stopped
+
+networks:
+  extremism-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  backend_logs:
+  bot_logs:
